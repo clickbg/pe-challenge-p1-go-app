@@ -62,10 +62,26 @@ git tag -a v1.0.0 -m "v1.0.0"
 git push origin v1.0.0
 ```
 
+## Deployment hand-off
+
+Deployment lives in a separate repo, [pe-challenge-p2-container](https://github.com/clickbg/pe-challenge-p2-container), which builds the container image and holds the Kubernetes manifests.
+
+`.github/workflows/dispatch.yml` connects the two. When the Release workflow finishes successfully for a tag push, it:
+
+1. Reads the tag from the finished run and checks it's semver.
+2. Mints a GitHub App installation token that lasts one hour, covers only the deploy repo, and is narrowed to `contents: write` (all `repository_dispatch` needs).
+3. Sends `repository_dispatch` with `event_type: app-released` and `{tag, source_run}` as the payload.
+
+The deploy repo takes it from there: it verifies this repo's release signature, smoke-tests the image in kind, pushes and signs it, and pins the manifest to the new digest.
+
+Why `workflow_run` and not `on: release`: the release is created with `GITHUB_TOKEN`, and GitHub doesn't start new workflows from events caused by `GITHUB_TOKEN`. A `release: published` trigger would never fire. `workflow_run` is normally treated with care because it runs with secrets after another workflow. Here it never checks out or executes anything from the triggering run, it only reads the tag name.
+
+Why a GitHub App and not a PAT: a PAT is tied to a person and lives for months. The App's private key stays in this repo's secrets and is only ever exchanged for short-lived, repo-scoped tokens.
+
 ## Verifying a release
 
 ```
-TAG=v0.1.0-rc.1
+TAG=v0.1.0
 mkdir -p /tmp/hm && cd /tmp/hm
 gh release download "$TAG" -R clickbg/pe-challenge-p1-go-app
 
@@ -129,6 +145,7 @@ Not visible in code, but part of the setup:
 
 - Dependency graph, Dependabot alerts, malware alerts and grouped security updates are on.
 - Code scanning receives semgrep SARIF from CI.
+- `DISPATCH_APP_CLIENT_ID` (variable) and `DISPATCH_APP_PRIVATE_KEY` (secret) for the `clickbg-release-dispatch` GitHub App. The App has Contents read/write only and is installed on the deploy repo only.
 - Recommended next: a tag ruleset limiting who can create `v*` tags, since pushing a tag is what publishes a signed release.
 
 ## License
