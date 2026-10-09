@@ -1,0 +1,65 @@
+name: Dispatch deploy
+
+# After a successful release, tell the deployment repo to build and publish
+# the container image for the new tag.
+#
+# A `release: published` trigger would never fire here: the release is created
+# with GITHUB_TOKEN, and events caused by GITHUB_TOKEN don't start new
+# workflows. workflow_run on the Release workflow does.
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] no code from the triggering run is checked out or executed; only the tag name is read and validated
+    workflows: [Release]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: dispatch-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  DEPLOY_REPO: pe-challenge-p2-container
+
+jobs:
+  dispatch:
+    name: Dispatch to ${{ github.repository_owner }}/pe-challenge-p2-container
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Resolve tag
+        env:
+          # For a tag push, head_branch holds the tag name.
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "error: '$TAG' is not a semver tag" >&2
+            exit 1
+          fi
+          echo "Dispatching $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # Short-lived (1h) installation token, scoped to the deployment repo
+      # and to contents: write, which is all repository_dispatch needs.
+      - id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ env.DEPLOY_REPO }}
+          permission-contents: write
+
+      - name: Send repository_dispatch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          gh api --method POST "repos/${OWNER}/${DEPLOY_REPO}/dispatches" \
+            -f event_type=app-released \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[source_run]=${SOURCE_RUN}"
+          echo "Sent app-released for ${TAG} to ${OWNER}/${DEPLOY_REPO}" | tee -a "$GITHUB_STEP_SUMMARY"
